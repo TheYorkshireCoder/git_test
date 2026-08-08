@@ -1,0 +1,42 @@
+name: Temporary VIX path-tension research data
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --disable-pip-version-check pandas numpy requests
+      - name: Download FRED market and volatility series
+        shell: bash
+        run: |
+          python - <<'PY'
+          import pandas as pd, numpy as np
+          from pathlib import Path
+          out=Path('export'); out.mkdir()
+          for sid in ['SP500','VIXCLS','VXVCLS']:
+              u=f'https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}'
+              x=pd.read_csv(u)
+              x.columns=['date',sid.lower()]
+              x['date']=pd.to_datetime(x.date,errors='coerce')
+              x[sid.lower()]=pd.to_numeric(x[sid.lower()].replace('.',np.nan),errors='coerce')
+              x=x.dropna().sort_values('date').drop_duplicates('date')
+              x.to_csv(out/f'{sid}.csv',index=False)
+              print(sid,len(x),x.iloc[0].to_dict(),x.iloc[-1].to_dict())
+          PY
+          sha256sum export/* > export/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vix-path-research-data
+          path: export/
+          retention-days: 1
+          if-no-files-found: error
