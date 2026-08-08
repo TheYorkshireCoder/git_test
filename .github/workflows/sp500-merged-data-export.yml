@@ -1,0 +1,57 @@
+name: Temporary merged S&P 500 data export
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --disable-pip-version-check pandas numpy
+      - name: Merge historical and current close series
+        shell: bash
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          import numpy as np
+          from pathlib import Path
+          hist_url = 'https://raw.githubusercontent.com/fja05680/dow-sp500-100-years/refs/heads/master/SP500.csv'
+          fred_url = 'https://fred.stlouisfed.org/graph/fredgraph.csv?id=SP500'
+          hist = pd.read_csv(hist_url)
+          hist.columns = [c.strip().lower().replace(' ', '_') for c in hist.columns]
+          hist['date'] = pd.to_datetime(hist['date'], errors='coerce')
+          hist['close'] = pd.to_numeric(hist['close'], errors='coerce')
+          hist = hist[['date','close']].dropna()
+          fred = pd.read_csv(fred_url)
+          fred.columns = [c.strip().lower() for c in fred.columns]
+          dc = next(c for c in fred.columns if 'date' in c)
+          vc = next(c for c in fred.columns if c != dc)
+          fred = fred.rename(columns={dc:'date', vc:'close'})
+          fred['date'] = pd.to_datetime(fred['date'], errors='coerce')
+          fred['close'] = pd.to_numeric(fred['close'].replace('.', np.nan), errors='coerce')
+          fred = fred[['date','close']].dropna()
+          start = fred['date'].min()
+          d = pd.concat([hist[hist.date < start], fred], ignore_index=True)
+          d = d.sort_values('date').drop_duplicates('date', keep='last')
+          d = d[d.close > 0].reset_index(drop=True)
+          Path('export').mkdir()
+          d.to_csv('export/sp500_merged_close.csv', index=False)
+          hist.to_csv('export/source_historical_close.csv', index=False)
+          fred.to_csv('export/source_fred_close.csv', index=False)
+          Path('export/metadata.txt').write_text(f'rows={len(d)}\nstart={d.date.min()}\nend={d.date.max()}\nlatest_close={d.close.iloc[-1]}\nfred_start={start}\n')
+          print(Path('export/metadata.txt').read_text())
+          PY
+          sha256sum export/* > export/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sp500-merged-data
+          path: export/
+          retention-days: 2
+          if-no-files-found: error
