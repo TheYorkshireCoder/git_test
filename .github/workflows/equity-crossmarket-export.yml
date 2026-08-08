@@ -1,0 +1,66 @@
+name: Temporary cross-market equity data export
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --disable-pip-version-check pandas numpy requests
+      - name: Download and standardize independent equity series
+        shell: bash
+        run: |
+          cat > /tmp/export.py <<'PY'
+          import io, requests, pandas as pd, numpy as np
+          from pathlib import Path
+          OUT=Path('export'); OUT.mkdir()
+          def get(url):
+              r=requests.get(url,timeout=60); r.raise_for_status(); return r.content
+          def fred(series):
+              x=pd.read_csv(io.BytesIO(get(f'https://fred.stlouisfed.org/graph/fredgraph.csv?id={series}')))
+              x.columns=['date','close']; x['date']=pd.to_datetime(x.date,errors='coerce'); x['close']=pd.to_numeric(x.close.replace('.',np.nan),errors='coerce')
+              return x.dropna().sort_values('date').drop_duplicates('date')
+          # Dow history + current FRED extension
+          old=pd.read_csv(io.BytesIO(get('https://raw.githubusercontent.com/fja05680/dow-sp500-100-years/master/DJA.csv')))
+          old=old.rename(columns={old.columns[0]:'date','Close':'close'})[['date','close']]
+          old['date']=pd.to_datetime(old.date,errors='coerce'); old['close']=pd.to_numeric(old.close,errors='coerce'); old=old.dropna()
+          cur=fred('DJIA'); start=cur.date.min()
+          dow=pd.concat([old[old.date<start],cur],ignore_index=True).sort_values('date').drop_duplicates('date',keep='last')
+          dow.to_csv(OUT/'dow_jones_close.csv',index=False)
+          fred('NASDAQCOM').to_csv(OUT/'nasdaq_composite_close.csv',index=False)
+          # A broad US-market series where FRED availability permits.
+          for sid,name in [('WILL5000IND','wilshire5000_close.csv'),('WILL5000INDFC','wilshire5000_fullcap_close.csv')]:
+              try:
+                  x=fred(sid)
+                  if len(x)>1000: x.to_csv(OUT/name,index=False)
+              except Exception as e: print('optional',sid,e)
+          # Tradable ETF mirrors from Stooq, used only as data-source replication.
+          for symbol,name in [('spy.us','spy_close.csv'),('qqq.us','qqq_close.csv'),('dia.us','dia_close.csv')]:
+              try:
+                  raw=get(f'https://stooq.com/q/d/l/?s={symbol}&i=d')
+                  x=pd.read_csv(io.BytesIO(raw))
+                  if 'Date' in x and 'Close' in x:
+                      x=x.rename(columns={'Date':'date','Close':'close'})[['date','close']]
+                      x['date']=pd.to_datetime(x.date,errors='coerce'); x['close']=pd.to_numeric(x.close,errors='coerce'); x=x.dropna().sort_values('date')
+                      if len(x)>1000: x.to_csv(OUT/name,index=False)
+              except Exception as e: print('optional',symbol,e)
+          for p in OUT.glob('*.csv'):
+              x=pd.read_csv(p); print(p.name,len(x),x.iloc[0,0],x.iloc[-1,0])
+          PY
+          python /tmp/export.py
+          sha256sum export/* > export/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cross-market-equity-data
+          path: export/
+          retention-days: 2
+          if-no-files-found: error
